@@ -1072,6 +1072,7 @@ class Mobical : public Handler {
   bool add_dump_before_solve = false;
   bool add_stats_after_solve = false;
   bool add_plain_after_options = false;
+  bool clone_check = false;
 
   /*----------------------------------------------------------------------*/
 
@@ -2024,7 +2025,9 @@ class Trace {
 
   int64_t id;
   uint64_t seed;
-
+  //create a second clone version
+  //solve call should return the same result in both versions, if not, we have a bug
+  // use the copy call
   Solver *solver;
   vector<Call *> calls;
   // map from mobical vars to solver vars (skipping extension variables)
@@ -2210,6 +2213,9 @@ public:
         }
 #endif
 
+        int clone_res = 0;
+        bool has_clone = false;
+
         if (c->type == Call::SOLVE) {
           // Look ahead and collect LemmaCalls to be executed
           // before solve is executed
@@ -2219,6 +2225,32 @@ public:
               next_c->execute (solver, extendmap);
             else
               break;
+          }
+
+          if (mobical.clone_check && !mobical.mock_pointer) {
+            Solver *clone = new Solver ();
+            solver->copy (*clone);
+
+            // Replay transient state (assumptions and constraints) on the clone
+            std::vector<Call*> transient_calls;
+            for (size_t j = 0; j < i; j++) {
+              Call *prev = calls[j];
+              if (prev->type == Call::SOLVE || prev->type == Call::SIMPLIFY || 
+                  prev->type == Call::LOOKAHEAD || prev->type == Call::RESET_ASSUMPTIONS ||
+                  prev->type == Call::RESET) {
+                transient_calls.clear();
+              } else if (prev->type == Call::ASSUME || prev->type == Call::CONSTRAIN || prev->type == Call::LIMIT) {
+                transient_calls.push_back(prev);
+              }
+            }
+            
+            for (Call *prev : transient_calls) {
+              prev->execute(clone, extendmap);
+            }
+
+            clone_res = clone->solve ();
+            delete clone;
+            has_clone = true;
           }
         }
         if (mobical.shared && process_type (c->type)) {
@@ -2234,6 +2266,10 @@ public:
             mobical.shared->unsat++;
         } else
           c->execute (solver, extendmap);
+
+        if (has_clone && clone_res != c->res) {
+          mobical.die ("cloned solver solve call returned %d but original solver returned %d", clone_res, c->res);
+        }
       } catch (const std::bad_alloc &e) {
         // Ignore out-of-memory errors and assume solver state is
         // consistent.
@@ -5064,6 +5100,8 @@ int Mobical::main (int argc, char **argv) {
       add_stats_after_solve = true;
     } else if (!strcmp (argv[i], "-p") || !strcmp (argv[i], "--plain")) {
       add_plain_after_options = true;
+    } else if (!strcmp (argv[i], "--clone-check")) {
+      clone_check = true;
     } else if (!strcmp (argv[i], "-L")) {
       if (limit >= 0)
         die ("multiple '-L' options (try '-h')");
